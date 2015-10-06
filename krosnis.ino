@@ -15,7 +15,7 @@ Adafruit_MAX31855 thermocouple(PIN_CS);
 #define TIMER1_FREQ 100
 #define TIMER1_PRELOAD (65536 - 16000000 / 256 / TIMER1_FREQ)
 
-uint8_t triac_power = 0;
+volatile uint8_t triac_power = 0;
 uint8_t pwm_counter = 0;
 
 // Timer1 overflow interrupt
@@ -38,8 +38,8 @@ void setup() {
     // wait for MAX chip to stabilize
     delay(500);
 
-    // Setup Timer1.
     noInterrupts();
+    // Setup Timer1.
     TCCR1A = 0;
     TCCR1B = 0;
     TCNT1 = TIMER1_PRELOAD;
@@ -76,5 +76,5 @@ void loop() {
         Serial.println();
     }
 
-    delay(50);
+    delay(100);
 }

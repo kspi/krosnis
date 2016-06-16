@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import sys
 import tkinter as tk
 from skardas import tkplot
@@ -10,13 +12,38 @@ from collections import namedtuple
 import time
 import csv
 import math
-from model import model
+from model import TemperatureModel
+
+
+model = TemperatureModel(
+    dt=1,
+    th_max=500,
+    heating_rc=389.3455569170953,
+    cooling_rc=738.4279072595713,
+    p_rc=150,
+)
+
+class Filter:
+    def __init__(self, a, b, x0=0):
+        self.a = a
+        self.b = b
+        self.y1 = x0
+        self.x1 = x0
+
+    def apply(self, x0):
+        y = self.b[0] * x0 + self.b[1] * self.x1 - self.a[1] * self.y1
+        self.y1 = y
+        self.x1 = x0
+        return y
+
+p_filter = Filter(model.a, model.b)
+
 
 
 class Status(namedtuple('Status', ['time', 'local_time', 'power', 'setpoint', 'temp_outside', 'temp_inside'])):
     @property
     def temp(self):
-        return self.temp_inside - self.temp_outside
+        return self.temp_inside
 
 
 START_TIME = time.time()
@@ -34,15 +61,17 @@ class Arduino:
         self.started = threading.Event()
         self.last_status = None
         self._power = None
-        self._setpoint = None
+        self._setpoint = 0
 
     def line_status(self, line):
-        t_ms, pwm, setpoint, temp_outside, temp_inside = line.strip().split(b',')
+        #t_ms, pwm, setpoint, temp_outside, temp_inside = line.strip().split(b',')
+        t_ms, pwm, _, _, temp_outside, temp_inside = line.strip().split(b',')
+        setpoint = self._setpoint
         t = float(t_ms) / 1000.0
         p = float(pwm) / 255.0
         temp_outside = float(temp_outside)
         temp_inside = float(temp_inside)
-        return Status(t, local_time(), p, setpoint, temp_outside, temp_inside)
+        return Status(t, local_time(), p, self._setpoint, temp_outside, temp_inside)
 
     def interact(self):
         with open(self.filename, 'wb') as f:
@@ -98,16 +127,12 @@ class Arduino:
 
     @property
     def setpoint(self):
-        assert(self.started.is_set())
         return self._setpoint
 
     @setpoint.setter
     def setpoint(self, setpoint):
-        assert(self.started.is_set())
-        assert(0 <= setpoint <= 255)
-        x = int(setpoint)
-        command = struct.pack('cB', b'S', x)
-        self.command.put(command)
+        self._setpoint = setpoint
+
     def start(self):
         self.thread.start()
         self.started.wait()
@@ -190,6 +215,10 @@ class Krosnis:
         self.arduino = Arduino("experiments/{}_raw.csv".format(experiment))
         self.every_status = []
         self.th0 = 0
+        self.state = 0
+        self.heating_power = 1
+        self.maxtemp = 250
+        self.started = True
 
     def set_status(self, status):
         self.label.config(text=status)
@@ -199,6 +228,7 @@ class Krosnis:
 
     def set_setpoint(self, event=None):
         self.arduino.setpoint = float(self.setpoint_val.get())
+        self.state = 0
 
     def start(self):
         _self = self
@@ -221,12 +251,48 @@ class Krosnis:
             return 0
 
     def control(self):
-        pass
-        #p_supp, full_time, full_val = model.optimize_heating(self.th0, float(self.setpoint_val.get()), self.arduino.power)
-        #if full_time > 1:
-        #    self.arduino.power = full_val
-        #else:
-        #    self.arduino.power = p_supp
+        #if local_time() > 45 * 60:
+        #    self.arduino.power = 0
+
+        if self.th0 == 0:
+            return
+
+        if self.state == 0:
+            if self.th0 < 26 or self.started:
+                self.state = 1
+                self.arduino.power = self.heating_power
+                self.started = False
+                print(dict(temp=self.th0, state=self.state, heating_power=self.heating_power, maxtemp=self.maxtemp))
+        elif self.state == 1:
+            if self.th0 > self.maxtemp:
+                self.state = 0
+                self.arduino.power = 0
+                self.heating_power *= 0.7
+                if self.maxtemp > 50:
+                    self.maxtemp -= 25
+                print(dict(state=self.state, heating_power=self.heating_power, maxtemp=self.maxtemp))
+
+        #p = p_filter.apply(self.arduino.power or 0)
+
+        #if self.state == 0:
+        #    args = (self.th0, self.arduino.setpoint, p)
+        #    print()
+        #    print('th0: {}\nsetpoint: {}\nfiltered p: {}'.format(*args))
+
+        #    result = model.optimize_heating(*args)
+
+        #    self.p_supp, self.full_time, self.full_val = result
+        #    self.full_stop_time = local_time() + self.full_time
+        #    print('support p: {}\nfull time: {}\nfull val: {}'.format(*result))
+        #    self.state = 1
+
+        #if self.state == 1:
+        #    if local_time() < self.full_stop_time:
+        #        print('local time:', local_time())
+        #        print('full stop time:', self.full_stop_time)
+        #        self.arduino.power = self.full_val
+        #    else:
+        #        self.arduino.power = self.p_supp
 
     def sample(self):
         self.arduino.start()
@@ -236,8 +302,7 @@ class Krosnis:
             while True:
                 try:
                     for s in self.arduino.iter_status():
-                        if self.th0 is None:
-                            self.th0 = s.temp
+                        self.th0 = s.temp
                         csvf.writerow(s)
                         self.set_status(str(s))
                         self.every_status.append(s)
